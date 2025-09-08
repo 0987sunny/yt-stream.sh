@@ -1,158 +1,156 @@
 #!/usr/bin/env zsh
+set -euo pipefail
 
-setopt no_nomatch
-autoload -Uz colors; colors
-
-# Prevent running as root
-if [[ "$EUID" -eq 0 ]]; then
-  print -P "%F{red}✖ Do not run this script as root or with sudo.%f"
+# ❌ Prevent execution as root
+if [[ $EUID -eq 0 ]]; then
+  print -P "%F{red}✘ Never run this as root. Use as regular user only.%f" >&2
   exit 1
 fi
 
-# Dependencies check
-for cmd in yt-dlp mpv fzf; do
-  if ! command -v $cmd >/dev/null; then
-    print -P "%F{red}Missing dependency: $cmd%f"
-    exit 1
-  fi
-done
+# 📥 Require a single argument
+if [[ $# -ne 1 ]]; then
+  print -P "%F{red}Usage:%f yt-stream \"<YouTube Video or Playlist URL>\""
+  exit 1
+fi
 
-# Config
-readonly mpv_flags=(
-  --no-terminal
-  --force-window=no
+URL="$1"
+
+# 🔁 Playback state
+typeset -g autoplay=off
+typeset -g random=off
+typeset -g -a played_history
+typeset -g last_index=0
+
+# 🎯 Output method
+MPV_VO="drm"
+[[ -n ${WAYLAND_DISPLAY:-} || -n ${DISPLAY:-} ]] && MPV_VO="gpu"
+
+# 🎛 MPV opts
+MPV_OPTS=(
+  "--vo=$MPV_VO"
+  --ytdl-format="bestvideo[height<=1080]+bestaudio/best"
   --no-config
-  --vo=drm
+  --no-resume-playback
+  --save-position-on-quit=no
   --cache=yes
+  --cache-on-disk=no
   --cache-secs=300
   --demuxer-max-bytes=400MiB
-  --demuxer-readahead-secs=10
-  --ytdl-format='bestvideo[height<=1080]+bestaudio/best'
+  --demuxer-readahead-secs=120
+  --ytdl-raw-options=no-cache-dir=
+  --force-window=no
 )
 
-# State
-typeset -ga videos played_history
-integer current_index=0 autoplay=0 random=0
-
-playlist_url="$1"
-[[ -z "$playlist_url" ]] && { print -P "%F{red}✖ No playlist or video URL provided.%f"; exit 1 }
-
-is_playlist() {
-  [[ "$playlist_url" == *"list="* ]]
+# 📋 Load playlist entries
+load_playlist() {
+  yt-dlp --flat-playlist -J "$URL" 2>/dev/null | \
+    jq -r '.entries[] | "\(.title) ::: \(.id)"'
 }
 
-fetch_playlist() {
-  videos=("${(@f)$(yt-dlp --flat-playlist --print "%title ::: %id" "$playlist_url" 2>/dev/null)}")
-}
-
-play_video() {
-  local title="$1"
-  local id="$2"
-  played_history+=("$id")
-  mpv "${mpv_flags[@]}" "https://youtube.com/watch?v=$id"
-}
-
-pick_random_index() {
-  echo $(( RANDOM % ${#videos[@]} ))
-}
-
-prev_video() {
-  if (( ${#played_history[@]} > 1 )); then
-    played_history[-1]=()
-    local prev_id="${played_history[-1]}"
-    for idx in {1..${#videos[@]}}; do
-      [[ "$videos[idx]" == *"$prev_id" ]] && current_index=$((idx - 1)) && break
-    done
-    play_video "${videos[$((current_index + 1))]%% ::: *}" "${prev_id}"
-  fi
-}
-
-next_video() {
-  if (( random )); then
-    current_index=$(pick_random_index)
+# 🔢 Autoplay logic
+next_index() {
+  if [[ "$random" == "on" ]]; then
+    echo $((RANDOM % ${#video_ids[@]}))
   else
-    (( current_index = (current_index + 1) % ${#videos[@]} ))
+    echo $(((last_index + 1) % ${#video_ids[@]}))
   fi
-  local entry="${videos[$((current_index + 1))]}"
-  local title="${entry%% ::: *}"
-  local id="${entry##*::: }"
-  play_video "$title" "$id"
 }
 
-menu_loop() {
+prev_index() {
+  if [[ "$random" == "on" ]]; then
+    echo $((RANDOM % ${#video_ids[@]}))
+  else
+    echo $(((last_index - 1 + ${#video_ids[@]}) % ${#video_ids[@]}))
+  fi
+}
+
+# ▶️ Play a video by index
+play_video_by_index() {
+  local index="$1"
+  last_index=$index
+  played_history+=($index)
+  local id="${video_ids[$index]}"
+  local url="https://youtube.com/watch?v=$id"
+  mpv "${MPV_OPTS[@]}" "$url" \
+    --input-conf=/dev/null \
+    --input-ipc-server=/tmp/yt-mpv-sock.$$ \
+    --idle=no \
+    --force-window=immediate \
+    --term-playing-msg="Press Ctrl+Right/Left or Esc" \
+    --script-opts="osc=no" || return
+
   while true; do
-    local menu_status
-    menu_status="\n%F{green}Playlist contains:%f ${#videos} videos"
-    menu_status+="\n%F{blue}Autoplay:%f ${(L)${autoplay:+ON}:-OFF}"
-    menu_status+="\n%F{magenta}Random:%f ${(L)${random:+ON}:-OFF}"
+    sleep 1
+    [[ ! -S /tmp/yt-mpv-sock.$$ ]] && break
+  done
+}
 
-    local choices=(" Exit ::: exit" "不 Random ::: toggle-random" "車 Autoplay ::: toggle-autoplay")
-    choices+=("${(@)videos}")
+# 🧠 Menu loop
+menu_loop() {
+  local entries status_header selection chosen title id
+  local playlist_json="$(yt-dlp --flat-playlist -J "$URL" 2>/dev/null)"
+  local total_videos=$(jq '.entries | length' <<<"$playlist_json")
 
-    local selected="$(
-      print -l -- "${choices[@]}" | \
-      fzf --ansi \
-          --no-sort \
-          --info=inline \
-          --prompt=$'%F{blue}Choose video:%f ' \
-          --header-first \
-          --header="$menu_status" \
-          --bind 'ctrl-a:toggle-autoplay' \
-          --bind 'ctrl-r:toggle-random' \
-          --bind 'esc:abort'
-    )" || return 0
+  mapfile -t video_ids < <(jq -r '.entries[].id' <<<"$playlist_json")
+  mapfile -t video_titles < <(jq -r '.entries[].title' <<<"$playlist_json")
 
-    local action="${selected##*::: }"
-    case "$action" in
-      exit)
-        return 0
-        ;;
-      toggle-random)
-        (( random ^= 1 ))
-        ;;
-      toggle-autoplay)
-        (( autoplay ^= 1 ))
-        ;;
+  while true; do
+    status_header=$'%F{green}Playlist contains:%f %F{white}'$#video_ids' videos%f\n'
+    status_header+=$'%F{magenta}Autoplay:%f %F{white}'$autoplay$'%f\n'
+    status_header+=$'%F{blue}Random:%f %F{white}'$random$'%f\n'
+
+    entries=(
+      "❌ Exit ::: exit"
+      "🔀 Random ::: toggle-random"
+      "🔁 Autoplay ::: toggle-autoplay"
+    )
+
+    for i in {1..$#video_titles}; do
+      entries+=("${video_titles[$i]} ::: ${video_ids[$i-1]}")
+    done
+
+    selection=$(print -l -- $entries | \
+      fzf --ansi --no-sort --no-multi --exit-0 \
+          --expect=ctrl-r,ctrl-a,esc \
+          --header="$status_header" \
+          --prompt="🎬 Choose video: ")
+
+    chosen=$(sed -n '$p' <<<"$selection")
+    key=$(head -n1 <<<"$selection")
+
+    case "$key" in
+      ctrl-a) autoplay=$([[ "$autoplay" == "on" ]] && echo "off" || echo "on"); continue ;;
+      ctrl-r) random=$([[ "$random" == "on" ]] && echo "off" || echo "on"); continue ;;
+      esc|"❌ Exit ::: exit"|exit|"") break ;;
+    esac
+
+    title="${chosen%% ::: *}"
+    id="${chosen##*::: }"
+
+    case "$id" in
+      toggle-random) random=$([[ "$random" == "on" ]] && echo "off" || echo "on") ;;
+      toggle-autoplay) autoplay=$([[ "$autoplay" == "on" ]] && echo "off" || echo "on") ;;
+      exit|"") break ;;
       *)
-        current_index=$(( ${choices[(ie)$selected]} - 4 ))
-        local title="${videos[$((current_index + 1))]%% ::: *}"
-        local id="${videos[$((current_index + 1))]##*::: }"
-        played_history+=("$id")
-
-        mpv "${mpv_flags[@]}" \
-            --input-conf=/dev/null \
-            --input-terminal=yes \
-            --term-playing-msg="" \
-            --idle=no \
-            --force-window=no \
-            --script-opts=osc=no \
-            --input-ipc-server=/tmp/mpv-socket-$$ \
-            --keep-open=yes \
-            --no-resume-playback \
-            --no-ytdl \
-            "https://youtube.com/watch?v=$id"
-
-        while true; do
-          read -sk1 key
-          case "$key" in
-            $'\e') break ;; # ESC → back to menu
-            $'\x1b[C') next_video ;; # Ctrl+Right
-            $'\x1b[D') prev_video ;; # Ctrl+Left
-          esac
-          (( autoplay )) || break
+        index=-1
+        for i in {1..$#video_ids}; do
+          [[ "${video_ids[$i]}" == "$id" ]] && index=$((i - 1)) && break
         done
-        ;;
+        [[ $index -ge 0 ]] && play_video_by_index "$index"
+
+        while [[ "$autoplay" == "on" ]]; do
+          index=$(next_index)
+          play_video_by_index "$index"
+        done
+      ;;
     esac
   done
 }
 
-main() {
-  if is_playlist; then
-    fetch_playlist || { print -P "%F{red}✖ Failed to fetch playlist.%f"; exit 1 }
-    menu_loop
-  else
-    mpv "${mpv_flags[@]}" "$playlist_url"
-  fi
-}
-
-main
+# 🔍 Decide: single video or playlist
+if yt-dlp --flat-playlist -J "$URL" 2>/dev/null | jq -e '.entries? | length > 0' >/dev/null; then
+  menu_loop
+else
+  print -P "%F{yellow}🎥 Video detected. Starting stream...%f"
+  mpv "${MPV_OPTS[@]}" "$URL"
+fi
