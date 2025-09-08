@@ -1,5 +1,4 @@
 #!/usr/bin/env zsh
-# v 1.0
 set -euo pipefail
 
 # ❌ Prevent execution as root
@@ -16,19 +15,14 @@ fi
 
 URL="$1"
 
-# 🔁 Playback state
-typeset -g autoplay=off
-typeset -g random=off
-typeset -g -a played_history
-typeset -g last_index=0
-typeset -g -a video_ids
-typeset -g -a video_titles
+# 🎯 Choose output method: TTY or GUI
+if [[ -n "${WAYLAND_DISPLAY:-}" || -n "${DISPLAY:-}" ]]; then
+  MPV_VO="gpu"
+else
+  MPV_VO="drm"
+fi
 
-# 🎯 Output method
-MPV_VO="drm"
-[[ -n ${WAYLAND_DISPLAY:-} || -n ${DISPLAY:-} ]] && MPV_VO="gpu"
-
-# 🎛 MPV opts
+# 🎛 MPV configuration (RAM-only buffer, 1080p max)
 MPV_OPTS=(
   "--vo=$MPV_VO"
   --ytdl-format="bestvideo[height<=1080]+bestaudio/best"
@@ -44,99 +38,30 @@ MPV_OPTS=(
   --force-window=no
 )
 
-# 🔢 Autoplay logic
-next_index() {
-  if [[ "$random" == "on" ]]; then
-    echo $((RANDOM % ${#video_ids[@]}))
-  else
-    echo $(((last_index + 1) % ${#video_ids[@]}))
-  fi
-}
-
-prev_index() {
-  if [[ "$random" == "on" ]]; then
-    echo $((RANDOM % ${#video_ids[@]}))
-  else
-    echo $(((last_index - 1 + ${#video_ids[@]}) % ${#video_ids[@]}))
-  fi
-}
-
-# ▶️ Play a video by index
-play_video_by_index() {
-  local index="$1"
-  last_index=$index
-  played_history+=($index)
-  local id="${video_ids[$index]}"
-  local url="https://youtube.com/watch?v=$id"
-  mpv "${MPV_OPTS[@]}" "$url" || true
-}
-
-# 🧠 Menu loop
-menu_loop() {
-  local entries status_header selection chosen title id key index
-
-  local playlist_json="$(yt-dlp --flat-playlist -J "$URL" 2>/dev/null)"
-
-  video_ids=("${(@f)$(jq -r '.entries[].id' <<<"$playlist_json")}")
-  video_titles=("${(@f)$(jq -r '.entries[].title' <<<"$playlist_json")}")
-
-  while true; do
-    status_header=$'%F{green}Playlist contains:%f %F{white}'${#video_ids}' videos%f\n'
-    status_header+=$'%F{magenta}Autoplay:%f %F{white}'$autoplay$'%f\n'
-    status_header+=$'%F{blue}Random:%f %F{white}'$random$'%f\n'
-
-    entries=(
-      "❌ Exit ::: exit"
-      "🔀 Random ::: toggle-random"
-      "🔁 Autoplay ::: toggle-autoplay"
-    )
-
-    for i in {1..${#video_titles[@]}}; do
-      entries+=("${video_titles[$i]} ::: ${video_ids[$((i - 1))]}")
-    done
-
-    selection=$(print -l -- $entries | \
-      fzf --ansi --no-sort --no-multi --exit-0 \
-          --expect=ctrl-r,ctrl-a,esc \
-          --header="$status_header" \
-          --prompt="🎬 Choose video: ")
-
-    chosen=$(sed -n '$p' <<<"$selection")
-    key=$(head -n1 <<<"$selection")
-
-    case "$key" in
-      ctrl-a) autoplay=$([[ "$autoplay" == "on" ]] && echo "off" || echo "on"); continue ;;
-      ctrl-r) random=$([[ "$random" == "on" ]] && echo "off" || echo "on"); continue ;;
-      esc|"❌ Exit ::: exit"|exit|"") break ;;
-    esac
-
-    title="${chosen%% ::: *}"
-    id="${chosen##*::: }"
-
-    case "$id" in
-      toggle-random) random=$([[ "$random" == "on" ]] && echo "off" || echo "on") ;;
-      toggle-autoplay) autoplay=$([[ "$autoplay" == "on" ]] && echo "off" || echo "on") ;;
-      exit|"") break ;;
-      *)
-        index=-1
-        for i in {1..${#video_ids[@]}}; do
-          [[ "${video_ids[$i]}" == "$id" ]] && index=$((i)) && break
-        done
-        [[ $index -ge 0 ]] && play_video_by_index "$((index - 1))"
-
-        while [[ "$autoplay" == "on" ]]; do
-          index=$(next_index)
-          play_video_by_index "$index"
-        done
-      ;;
-    esac
-  done
-}
-
-# 🔍 Decide: single video or playlist
+# 🔍 Detect playlist vs single video
 if yt-dlp --flat-playlist -J "$URL" 2>/dev/null | jq -e '.entries? | length > 0' >/dev/null; then
-  menu_loop
+  # 🎞️ Playlist detected
+  while true; do
+    print -P "%F{yellow}🎞  Playlist detected. Loading video list...%f"
+    SELECTION=$(yt-dlp --flat-playlist -J "$URL" \
+      | jq -r '.entries[] | "\(.title) ::: \(.id)"' \
+      | sed '$a❌ Exit ::: exit' \
+      | fzf --prompt="🎬 Choose video: " --exit-0)
+
+    # Exit if Esc or nothing selected
+    [[ -z "$SELECTION" ]] && break
+
+    TITLE="${SELECTION%% ::: *}"
+    ID="${SELECTION##*::: }"
+
+    [[ "$ID" == "exit" ]] && break
+
+    VIDEO_URL="https://youtube.com/watch?v=$ID"
+    mpv "${MPV_OPTS[@]}" "$VIDEO_URL" || true
+  done
+
 else
+  # 🎥 Single video
   print -P "%F{yellow}🎥 Video detected. Starting stream...%f"
   mpv "${MPV_OPTS[@]}" "$URL"
 fi
