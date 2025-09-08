@@ -1,13 +1,9 @@
 #!/usr/bin/env zsh
 
-# ┌──────────────────────────────────────────────────────┐
-# │                 yt-stream: FINAL VERSION             │
-# └──────────────────────────────────────────────────────┘
-
 setopt no_nomatch
 autoload -Uz colors; colors
 
-# Prevent running as root (including via sudo)
+# Prevent running as root
 if [[ "$EUID" -eq 0 ]]; then
   print -P "%F{red}✖ Do not run this script as root or with sudo.%f"
   exit 1
@@ -38,7 +34,6 @@ readonly mpv_flags=(
 typeset -ga videos played_history
 integer current_index=0 autoplay=0 random=0
 
-# Playlist parsing
 playlist_url="$1"
 [[ -z "$playlist_url" ]] && { print -P "%F{red}✖ No playlist or video URL provided.%f"; exit 1 }
 
@@ -86,10 +81,10 @@ next_video() {
 
 menu_loop() {
   while true; do
-    local status
-    status="\n%F{green}Playlist contains:%f ${#videos} videos"
-    status+="\n%F{blue}Autoplay:%f ${(L)${autoplay:+ON}:-OFF}"
-    status+="\n%F{magenta}Random:%f ${(L)${random:+ON}:-OFF}"
+    local menu_status
+    menu_status="\n%F{green}Playlist contains:%f ${#videos} videos"
+    menu_status+="\n%F{blue}Autoplay:%f ${(L)${autoplay:+ON}:-OFF}"
+    menu_status+="\n%F{magenta}Random:%f ${(L)${random:+ON}:-OFF}"
 
     local choices=(" Exit ::: exit" "不 Random ::: toggle-random" "車 Autoplay ::: toggle-autoplay")
     choices+=("${(@)videos}")
@@ -101,7 +96,7 @@ menu_loop() {
           --info=inline \
           --prompt=$'%F{blue}Choose video:%f ' \
           --header-first \
-          --header="$status" \
+          --header="$menu_status" \
           --bind 'ctrl-a:toggle-autoplay' \
           --bind 'ctrl-r:toggle-random' \
           --bind 'esc:abort'
@@ -135,23 +130,14 @@ menu_loop() {
             --keep-open=yes \
             --no-resume-playback \
             --no-ytdl \
-            --script=~/.config/mpv/scripts/yt-stream-hooks.lua \
             "https://youtube.com/watch?v=$id"
 
         while true; do
           read -sk1 key
           case "$key" in
-            $'\e')
-              break
-              ;;
-            '') # Enter does nothing
-              ;;
-            $'\x1b[C') # Ctrl+Right
-              next_video
-              ;;
-            $'\x1b[D') # Ctrl+Left
-              prev_video
-              ;;
+            $'\e') break ;; # ESC → back to menu
+            $'\x1b[C') next_video ;; # Ctrl+Right
+            $'\x1b[D') prev_video ;; # Ctrl+Left
           esac
           (( autoplay )) || break
         done
