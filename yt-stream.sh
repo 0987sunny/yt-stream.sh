@@ -20,6 +20,8 @@ typeset -g autoplay=off
 typeset -g random=off
 typeset -g -a played_history
 typeset -g last_index=0
+typeset -g -a video_ids
+typeset -g -a video_titles
 
 # 🎯 Output method
 MPV_VO="drm"
@@ -40,12 +42,6 @@ MPV_OPTS=(
   --ytdl-raw-options=no-cache-dir=
   --force-window=no
 )
-
-# 📋 Load playlist entries
-load_playlist() {
-  yt-dlp --flat-playlist -J "$URL" 2>/dev/null | \
-    jq -r '.entries[] | "\(.title) ::: \(.id)"'
-}
 
 # 🔢 Autoplay logic
 next_index() {
@@ -71,31 +67,20 @@ play_video_by_index() {
   played_history+=($index)
   local id="${video_ids[$index]}"
   local url="https://youtube.com/watch?v=$id"
-  mpv "${MPV_OPTS[@]}" "$url" \
-    --input-conf=/dev/null \
-    --input-ipc-server=/tmp/yt-mpv-sock.$$ \
-    --idle=no \
-    --force-window=immediate \
-    --term-playing-msg="Press Ctrl+Right/Left or Esc" \
-    --script-opts="osc=no" || return
-
-  while true; do
-    sleep 1
-    [[ ! -S /tmp/yt-mpv-sock.$$ ]] && break
-  done
+  mpv "${MPV_OPTS[@]}" "$url" || true
 }
 
 # 🧠 Menu loop
 menu_loop() {
-  local entries status_header selection chosen title id
-  local playlist_json="$(yt-dlp --flat-playlist -J "$URL" 2>/dev/null)"
-  local total_videos=$(jq '.entries | length' <<<"$playlist_json")
+  local entries status_header selection chosen title id key index
 
-  mapfile -t video_ids < <(jq -r '.entries[].id' <<<"$playlist_json")
-  mapfile -t video_titles < <(jq -r '.entries[].title' <<<"$playlist_json")
+  local playlist_json="$(yt-dlp --flat-playlist -J "$URL" 2>/dev/null)"
+
+  video_ids=("${(@f)$(jq -r '.entries[].id' <<<"$playlist_json")}")
+  video_titles=("${(@f)$(jq -r '.entries[].title' <<<"$playlist_json")}")
 
   while true; do
-    status_header=$'%F{green}Playlist contains:%f %F{white}'$#video_ids' videos%f\n'
+    status_header=$'%F{green}Playlist contains:%f %F{white}'${#video_ids}' videos%f\n'
     status_header+=$'%F{magenta}Autoplay:%f %F{white}'$autoplay$'%f\n'
     status_header+=$'%F{blue}Random:%f %F{white}'$random$'%f\n'
 
@@ -105,8 +90,8 @@ menu_loop() {
       "🔁 Autoplay ::: toggle-autoplay"
     )
 
-    for i in {1..$#video_titles}; do
-      entries+=("${video_titles[$i]} ::: ${video_ids[$i-1]}")
+    for i in {1..${#video_titles[@]}}; do
+      entries+=("${video_titles[$i]} ::: ${video_ids[$((i - 1))]}")
     done
 
     selection=$(print -l -- $entries | \
@@ -133,10 +118,10 @@ menu_loop() {
       exit|"") break ;;
       *)
         index=-1
-        for i in {1..$#video_ids}; do
-          [[ "${video_ids[$i]}" == "$id" ]] && index=$((i - 1)) && break
+        for i in {1..${#video_ids[@]}}; do
+          [[ "${video_ids[$i]}" == "$id" ]] && index=$((i)) && break
         done
-        [[ $index -ge 0 ]] && play_video_by_index "$index"
+        [[ $index -ge 0 ]] && play_video_by_index "$((index - 1))"
 
         while [[ "$autoplay" == "on" ]]; do
           index=$(next_index)
