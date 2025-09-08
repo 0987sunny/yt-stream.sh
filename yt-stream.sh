@@ -1,5 +1,5 @@
 #!/usr/bin/env zsh
-set -euo pipefail
+set -euo pipefail 
 
 # ❌ Prevent execution as root
 if [[ $EUID -eq 0 ]]; then
