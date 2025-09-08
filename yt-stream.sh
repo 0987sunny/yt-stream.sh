@@ -1,5 +1,4 @@
 #!/usr/bin/env zsh
-# v 1.0
 set -euo pipefail
 
 # ❌ Prevent execution as root
@@ -58,11 +57,11 @@ if yt-dlp --flat-playlist -J "$URL" 2>/dev/null | jq -e '.entries? | length > 0'
     [[ "$ID" == "exit" ]] && break
 
     VIDEO_URL="https://youtube.com/watch?v=$ID"
-    mpv "${MPV_OPTS[@]}" "$VIDEO_URL" || true
+    mpv "${MPV_OPTS[@]}" --input-conf=<(echo "ESC quit") "$VIDEO_URL" || true
   done
 
 else
   # 🎥 Single video
   print -P "%F{yellow}🎥 Video detected. Starting stream...%f"
-  mpv "${MPV_OPTS[@]}" "$URL"
+  mpv "${MPV_OPTS[@]}" --input-conf=<(echo "ESC quit") "$URL"
 fi
