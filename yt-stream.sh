@@ -1,144 +1,111 @@
 #!/usr/bin/env zsh
 
-set -euo pipefail
+# Enforce non-root for security
+if [[ $EUID -eq 0 ]]; then
+  print -P "%F{red}✖ Do not run yt-stream as root. Run it as a regular user.%f"
+  exit 1
+fi
 
-# Dependencies
-command -v mpv >/dev/null || { echo "mpv not found"; exit 1; }
-command -v yt-dlp >/dev/null || { echo "yt-dlp not found"; exit 1; }
-command -v fzf >/dev/null || { echo "fzf not found"; exit 1; }
+autoload -Uz colors; colors
+setopt no_nomatch
 
-# Block root execution
-[[ $EUID -eq 0 ]] && exit 1
+# --- MPV SETTINGS ---
+BUFFER_MB=400
+READAHEAD_SEC=60
+MPV_ARGS=(--no-config --vo=drm --ytdl-format='bestvideo[height<=1080]+bestaudio/best[height<=1080]'
+          --cache=yes --cache-secs=$READAHEAD_SEC --demuxer-max-bytes=$((BUFFER_MB * 1024 * 1024))
+          --terminal --keep-open=no --no-terminal-prompt --really-quiet)
 
-# Check argument
-[[ $# -eq 0 ]] && { echo "Usage: yt-stream 'https://youtube.com/...'"; exit 1; }
+# --- CONTROLS ---
+autoplay=0
+random_mode=0
+declare -a play_history=()
+play_index=0
+
+# --- VIDEO HANDLING ---
+play_video() {
+  local index="$1"
+  play_history+=($index)
+  play_index=$#play_history
+
+  local url="${urls[$index]}"
+  local title="${titles[$index]}"
+  print -P "%F{blue}▶ Playing:%f $title"
+
+  if [[ $DISPLAY ]]; then
+    mpv --vo=gpu "${MPV_ARGS[@]}" "$url"
+  else
+    mpv "${MPV_ARGS[@]}" "$url"
+  fi
+
+  local exit_code=$?
+  if [[ $exit_code -eq 0 ]]; then
+    if (( autoplay )); then
+      if (( random_mode )); then
+        play_random
+      else
+        local next=$(( index + 1 ))
+        (( next <= $#urls )) && play_video $next
+      fi
+    fi
+  fi
+}
+
+play_random() {
+  local pick=$(( (RANDOM % $#urls) + 1 ))
+  play_video $pick
+}
+
+prev_video() {
+  (( play_index > 1 )) && play_video ${play_history[play_index-1]}
+}
+
+# --- PLAYLIST LOADING ---
+load_playlist() {
+  urls=("${(@f)$(yt-dlp --flat-playlist --print "url" "$1")}")
+  titles=("${(@f)$(yt-dlp --flat-playlist --print "title" "$1")}")
+}
+
+# --- MAIN ---
+if [[ -z "$1" ]]; then
+  print -P "%F{red}✖ Usage:%f yt-stream \"<youtube-url>\""
+  exit 1
+fi
 
 url="$1"
-autoplay=0
-random=0
-history=()
-history_idx=-1
+if [[ "$url" == *"list="* ]]; then
+  load_playlist "$url"
 
-# Detect TTY or GUI terminal
-use_gpu() {
-  [[ -n "${WAYLAND_DISPLAY:-}${DISPLAY:-}" ]] && return 0
-  return 1
-}
-
-mpv_common_flags=(
-  --no-config
-  --ytdl-format="bestvideo[height<=1080]+bestaudio/best[height<=1080]"
-  --cache=yes
-  --cache-secs=300
-  --demuxer-max-bytes=400MiB
-  --demuxer-max-back-bytes=100MiB
-  --no-terminal
-  --force-window=no
-  --keep-open=no
-  --really-quiet
-)
-
-[[ $(use_gpu) == 0 ]] && vo="gpu" || vo="drm"
-
-# Play one video
-play_video() {
-  local vid_url="$1"
-  history+=("$vid_url")
-  history_idx=$(( ${#history[@]} - 1 ))
-
-  mpv "${mpv_common_flags[@]}" --vo=$vo --input-conf=/dev/stdin "$vid_url" <<-EOF
-    ESC quit
-    CTRL+RIGHT run "${0:A}" --next "$url"
-    CTRL+LEFT run "${0:A}" --prev "$url"
-EOF
-}
-
-# Load playlist
-load_playlist() {
-  yt-dlp --flat-playlist --print "%(title)s ::: %(url)s" "$url"
-}
-
-# Parse playlist entries
-pick_video_from_playlist() {
   while true; do
-    local status="Autoplay: $([[ $autoplay -eq 1 ]] && echo ON || echo OFF) | Random: $([[ $random -eq 1 ]] && echo ON || echo OFF)"
-    local entries=(
-      "🔁 Toggle Autoplay"
-      "🔀 Toggle Random"
-      "❌ Exit"
-    )
+    clear
+    print -P "%F{magenta}Autoplay:%f $([[ $autoplay -eq 1 ]] && print -P '%F{green}ON%f' || print -P '%F{red}OFF%f')   %F{magenta}Random:%f $([[ $random_mode -eq 1 ]] && print -P '%F{green}ON%f' || print -P '%F{red}OFF%f')"
+    print -P "%F{blue}Choose video:%f"
 
-    local videos=("${(@f)$(load_playlist)}")
-    local display_videos=("${videos[@]}" "${entries[@]}")
+    choices=("❌ Exit ::: exit" "🔀 Random ::: random" "🎬 Autoplay ::: autoplay")
+    for i in {1..$#titles}; do
+      choices+=("${titles[$i]} ::: ${urls[$i]}")
+    done
 
-    local choice="$(printf "%s\n" "${entries[@]}" "${videos[@]}" | fzf --reverse --prompt="Choose video: " --header-lines=3 --header="$status" --bind "ctrl-a:toggle-autoplay,ctrl-r:toggle-random")"
+    selection=$(printf "%s\n" $choices | fzf --ansi --reverse --no-sort --bind "ctrl-r:execute-silent(echo toggle-random > /tmp/yt-stream-cmd)+reload(sync)" --bind "ctrl-a:execute-silent(echo toggle-autoplay > /tmp/yt-stream-cmd)+reload(sync)" --expect=esc --delimiter=' ::: ' --with-nth=1)
 
-    case "$choice" in
-      "❌ Exit") exit 0 ;;
-      "🔁 Toggle Autoplay") autoplay=$((1 - autoplay)) ;;
-      "🔀 Toggle Random") random=$((1 - random)) ;;
-      "") exit 0 ;;
+    key=${selection[1]}
+    sel=${selection[2]}
+
+    [[ "$key" == "esc" ]] && exit 0
+
+    [[ -z "$sel" ]] && continue
+
+    case "$sel" in
+      exit) exit 0 ;;
+      autoplay) autoplay=$(( ! autoplay )) ;;
+      random) play_random ;;
       *)
-        if [[ "$choice" =~ ::: ]]; then
-          local selected_url="https://youtube.com/watch?$(awk -F' ::: ' '{print $2}' <<< "$choice")"
-          play_and_maybe_loop "$selected_url" "${videos[@]}"
-        fi
+        for i in {1..$#urls}; do
+          [[ "$urls[$i]" == "$sel" ]] && play_video $i && break
+        done
         ;;
     esac
   done
-}
-
-# Next/Prev/random playback handler
-play_and_maybe_loop() {
-  local current="$1"
-  shift
-  local list=("$@")
-
-  while true; do
-    play_video "$current"
-
-    [[ $autoplay -eq 0 ]] && break
-
-    if [[ $random -eq 1 ]]; then
-      current="https://youtube.com/watch?$(printf "%s\n" "${list[@]}" | shuf -n1 | awk -F' ::: ' '{print $2}')"
-    else
-      local i; for i in {1..${#list[@]}}; do
-        if [[ "$current" == *"${list[i]}"* ]]; then
-          current="https://youtube.com/watch?$(awk -F' ::: ' '{print $2}' <<< "${list[i+1]}")"
-          break
-        fi
-      done
-    fi
-  done
-}
-
-# History-based prev/next (for hotkeys)
-if [[ "${1:-}" == "--next" || "${1:-}" == "--prev" ]]; then
-  shift
-  [[ -z "${2:-}" ]] && exit 0
-  list=("${(@f)$(load_playlist)}")
-  current_idx=$history_idx
-
-  if [[ "$1" == "--next" ]]; then
-    if [[ $random -eq 1 ]]; then
-      next_url="https://youtube.com/watch?$(printf "%s\n" "${list[@]}" | shuf -n1 | awk -F' ::: ' '{print $2}')"
-    else
-      next_idx=$(( current_idx + 1 ))
-      [[ $next_idx -ge ${#list[@]} ]] && next_idx=0
-      next_url="https://youtube.com/watch?$(awk -F' ::: ' '{print $2}' <<< "${list[next_idx]}")"
-    fi
-    play_video "$next_url"
-  else
-    prev_idx=$(( current_idx - 1 ))
-    [[ $prev_idx -lt 0 ]] && prev_idx=0
-    play_video "${history[$prev_idx]}"
-  fi
-  exit 0
-fi
-
-# Entry point
-if [[ "$url" == *"list="* ]]; then
-  pick_video_from_playlist
 else
-  play_video "$url"
+  mpv "${MPV_ARGS[@]}" "$url"
 fi
