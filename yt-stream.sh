@@ -1,16 +1,13 @@
 #!/usr/bin/env zsh
 set -euo pipefail
 
-# ❌ Prevent root execution
+# ❌ Prevent execution as root
 if [[ $EUID -eq 0 ]]; then
   print -P "%F{red}✘ Never run this as root. Use as regular user only.%f" >&2
   exit 1
 fi
 
-# 🎨 Minimal header
-print -P "%F{208}▶ YT-STREAM: Secure, Buffered, Ephemeral Playback%f\n"
-
-# 📥 Require exactly one argument (URL)
+# 📥 Require a single argument
 if [[ $# -ne 1 ]]; then
   print -P "%F{red}Usage:%f yt-stream \"<YouTube Video or Playlist URL>\""
   exit 1
@@ -18,14 +15,14 @@ fi
 
 URL="$1"
 
-# 🎯 Choose --vo based on environment
+# 🎯 Choose output method: TTY or GUI
 if [[ -n "${WAYLAND_DISPLAY:-}" || -n "${DISPLAY:-}" ]]; then
   MPV_VO="gpu"
 else
   MPV_VO="drm"
 fi
 
-# 🎛 Common mpv options
+# 🎛 MPV configuration (RAM-only buffer, 1080p max)
 MPV_OPTS=(
   "--vo=$MPV_VO"
   --ytdl-format="bestvideo[height<=1080]+bestaudio/best"
@@ -49,9 +46,10 @@ if yt-dlp --flat-playlist -J "$URL" 2>/dev/null | jq -e '.entries? | length > 0'
     SELECTION=$(yt-dlp --flat-playlist -J "$URL" \
       | jq -r '.entries[] | "\(.title) ::: \(.id)"' \
       | sed '$a❌ Exit ::: exit' \
-      | fzf --prompt="🎬 Choose video: ")
+      | fzf --prompt="🎬 Choose video: " --exit-0)
 
-    [[ -z "$SELECTION" ]] && continue
+    # Exit if Esc or nothing selected
+    [[ -z "$SELECTION" ]] && break
 
     TITLE="${SELECTION%% ::: *}"
     ID="${SELECTION##*::: }"
@@ -59,7 +57,7 @@ if yt-dlp --flat-playlist -J "$URL" 2>/dev/null | jq -e '.entries? | length > 0'
     [[ "$ID" == "exit" ]] && break
 
     VIDEO_URL="https://youtube.com/watch?v=$ID"
-    mpv "${MPV_OPTS[@]}" "$VIDEO_URL"
+    mpv "${MPV_OPTS[@]}" "$VIDEO_URL" || true
   done
 
 else
