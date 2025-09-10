@@ -1,4 +1,5 @@
 #!/usr/bin/env zsh
+# v 1.0
 set -euo pipefail
 
 # ❌ Prevent execution as root
@@ -7,13 +8,22 @@ if [[ $EUID -eq 0 ]]; then
   exit 1
 fi
 
-# 📥 Require a single argument
-if [[ $# -ne 1 ]]; then
-  print -P "%F{red}Usage:%f yt-stream \"<YouTube Video or Playlist URL>\""
+# 📥 Parse CLI args
+DRM_CONNECTOR=""
+URL=""
+
+for arg in "$@"; do
+  if [[ "$arg" == --drm-connector=* ]]; then
+    DRM_CONNECTOR="${arg#--drm-connector=}"
+  else
+    URL="$arg"
+  fi
+done
+
+if [[ -z "$URL" ]]; then
+  print -P "%F{red}Usage:%f yt-stream [--drm-connector=HDMI-A-1] \"<YouTube Video or Playlist URL>\""
   exit 1
 fi
-
-URL="$1"
 
 # 🎯 Choose output method: TTY or GUI
 if [[ -n "${WAYLAND_DISPLAY:-}" || -n "${DISPLAY:-}" ]]; then
@@ -37,6 +47,11 @@ MPV_OPTS=(
   --ytdl-raw-options=no-cache-dir=
   --force-window=no
 )
+
+# ➕ Add connector override if set AND using drm
+if [[ "$MPV_VO" == "drm" && -n "$DRM_CONNECTOR" ]]; then
+  MPV_OPTS+=("--drm-connector=$DRM_CONNECTOR")
+fi
 
 # 🔍 Detect playlist vs single video
 if yt-dlp --flat-playlist -J "$URL" 2>/dev/null | jq -e '.entries? | length > 0' >/dev/null; then
