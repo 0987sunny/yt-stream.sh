@@ -1,5 +1,5 @@
 #!/usr/bin/env zsh
-# v 1.0
+# v 1.1
 set -euo pipefail
 
 # ❌ Prevent execution as root
